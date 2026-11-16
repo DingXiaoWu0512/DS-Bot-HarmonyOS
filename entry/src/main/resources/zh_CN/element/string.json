@@ -1,0 +1,20 @@
+{
+  "string": [
+    {
+      "name": "app_name",
+      "value": "DS Bot"
+    },
+    {
+      "name": "module_desc",
+      "value": "DS Bot 手机客户端"
+    },
+    {
+      "name": "ability_desc",
+      "value": "控制运行在你电脑上的 Bot 团队"
+    },
+    {
+      "name": "camera_reason",
+      "value": "DS Bot 使用相机扫描电脑上出示的配对二维码。"
+    }
+  ]
+}

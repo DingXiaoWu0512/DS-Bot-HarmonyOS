@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "DS Bot phone client"
+    },
+    {
+      "name": "ability_desc",
+      "value": "Controls the Bot team that runs on your computer"
+    },
+    {
+      "name": "camera_reason",
+      "value": "DS Bot uses the camera to scan the pairing code that your computer shows."
+    }
+  ]
+}

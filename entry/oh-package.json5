@@ -1,0 +1,8 @@
+{
+  "name": "entry",
+  "version": "1.0.0",
+  "description": "DS Bot entry module. Same screens and link protocol as mobile/, on HarmonyOS.",
+  "main": "",
+  "author": "Fei2411",
+  "license": "Apache-2.0"
+}

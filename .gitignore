@@ -1,0 +1,35 @@
+# Build outputs
+/build/
+/entry/build/
+/.hvigor/
+/.cache/
+
+# IDE
+/.idea/
+/.vscode/
+/*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+jscrash.log
+
+# Local config
+local.properties
+
+# Node modules (test deps)
+/test/node_modules/
+
+# Signing keys (never commit)
+*.p12
+*.cer
+*.p7b
+*.keystore
+
+# Temp files
+*.tmp
+*.temp
+~$

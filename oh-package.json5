@@ -1,0 +1,9 @@
+{
+  "modelVersion": "26.0.0",
+  "name": "dsbot-harmony",
+  "version": "1.0.0",
+  "description": "DS Bot for HarmonyOS. Port of the DS Bot mobile app (mobile/) to HarmonyOS.",
+  "main": "",
+  "author": "Fei2411",
+  "license": "Apache-2.0"
+}

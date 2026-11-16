@@ -1,0 +1,119 @@
+{
+  "routerMap": [
+    {
+      "name": "needs",
+      "buildFunction": "NeedsYouBuilder",
+      "pageSourceFile": "src/main/ets/screens/NeedsYou.ets"
+    },
+    {
+      "name": "botDetails",
+      "buildFunction": "BotDetailsBuilder",
+      "pageSourceFile": "src/main/ets/screens/BotDetails.ets"
+    },
+    {
+      "name": "botEdit",
+      "buildFunction": "BotEditBuilder",
+      "pageSourceFile": "src/main/ets/screens/BotEdit.ets"
+    },
+    {
+      "name": "newBot",
+      "buildFunction": "NewBotBuilder",
+      "pageSourceFile": "src/main/ets/screens/NewChat.ets"
+    },
+    {
+      "name": "newGroup",
+      "buildFunction": "NewGroupBuilder",
+      "pageSourceFile": "src/main/ets/screens/NewChat.ets"
+    },
+    {
+      "name": "groupDetails",
+      "buildFunction": "GroupDetailsBuilder",
+      "pageSourceFile": "src/main/ets/screens/GroupDetails.ets"
+    },
+    {
+      "name": "groupSettings",
+      "buildFunction": "GroupSettingsBuilder",
+      "pageSourceFile": "src/main/ets/screens/GroupSettings.ets"
+    },
+    {
+      "name": "memory",
+      "buildFunction": "MemoryBuilder",
+      "pageSourceFile": "src/main/ets/screens/Memory.ets"
+    },
+    {
+      "name": "schedules",
+      "buildFunction": "SchedulesBuilder",
+      "pageSourceFile": "src/main/ets/screens/Schedules.ets"
+    },
+    {
+      "name": "folder",
+      "buildFunction": "FolderBuilder",
+      "pageSourceFile": "src/main/ets/screens/Folder.ets"
+    },
+    {
+      "name": "usage",
+      "buildFunction": "UsageBuilder",
+      "pageSourceFile": "src/main/ets/screens/Usage.ets"
+    },
+    {
+      "name": "side",
+      "buildFunction": "SideBuilder",
+      "pageSourceFile": "src/main/ets/screens/Side.ets"
+    },
+    {
+      "name": "botBrowser",
+      "buildFunction": "BotBrowserBuilder",
+      "pageSourceFile": "src/main/ets/screens/BotBrowser.ets"
+    },
+    {
+      "name": "settings",
+      "buildFunction": "SettingsBuilder",
+      "pageSourceFile": "src/main/ets/screens/Settings.ets"
+    },
+    {
+      "name": "computers",
+      "buildFunction": "ComputersBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/TeamPages.ets"
+    },
+    {
+      "name": "providers",
+      "buildFunction": "ProvidersBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/Providers.ets"
+    },
+    {
+      "name": "connectors",
+      "buildFunction": "ConnectorsBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/Connectors.ets"
+    },
+    {
+      "name": "capabilities",
+      "buildFunction": "CapabilitiesBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/Capabilities.ets"
+    },
+    {
+      "name": "teamUsage",
+      "buildFunction": "TeamUsageBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/TeamPages.ets"
+    },
+    {
+      "name": "secrets",
+      "buildFunction": "SecretsBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/TeamPages.ets"
+    },
+    {
+      "name": "location",
+      "buildFunction": "LocationBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/TeamPages.ets"
+    },
+    {
+      "name": "updates",
+      "buildFunction": "UpdatesBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/AboutPages.ets"
+    },
+    {
+      "name": "about",
+      "buildFunction": "AboutBuilder",
+      "pageSourceFile": "src/main/ets/screens/settings/AboutPages.ets"
+    }
+  ]
+}
