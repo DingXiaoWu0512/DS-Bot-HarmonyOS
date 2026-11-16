@@ -1,5 +1,7 @@
 # DS Bot for HarmonyOS
 
+[English](README.md) | [中文](README_ZH.md)
+
 [![HarmonyOS](https://img.shields.io/badge/HarmonyOS-5.0%20(API%2026)-007DFF?logo=harmonyos&logoColor=white)](https://developer.harmonyos.com/)
 [![ArkTS](https://img.shields.io/badge/ArkTS-TypeScript%20超集-3178C6?logo=typescript&logoColor=white)](https://developer.harmonyos.com/cn/docs/documentation/doc-guides-V3/arkts-overview-0000001477981650-V3)
 [![Hvigor](https://img.shields.io/badge/构建-Hvigor-FF6B35)](https://hvigor.com/)
