@@ -15,11 +15,20 @@
 
 ## 📱 截图预览
 
-| Bot 列表 | 聊天界面 | 设置页面 |
-|:--------:|:--------:|:--------:|
-| ![Bot List](entry/src/main/resources/base/media/app_icon.png) | ![Chat](entry/src/main/resources/base/media/app_icon.png) | ![Settings](entry/src/main/resources/base/media/app_icon.png) |
+以下截图均来自 HarmonyOS 5.0 真机。
 
-*截图即将上线 —— 可在 DevEco Studio 预览器或真机运行查看。*
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/shot-1.jpg" width="180" alt="侧边对话"><br><b>侧边对话</b></td>
+    <td align="center"><img src="docs/images/shot-2.jpg" width="180" alt="聊天界面"><br><b>聊天界面</b></td>
+    <td align="center"><img src="docs/images/shot-3.jpg" width="180" alt="Bot 详情"><br><b>Bot 详情</b></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/shot-4.jpg" width="180" alt="对话页面"><br><b>对话页面</b></td>
+    <td align="center"><img src="docs/images/shot-5.jpg" width="180" alt="设置页面"><br><b>设置页面</b></td>
+    <td align="center"></td>
+  </tr>
+</table>
 
 ---
 

@@ -4,10 +4,11 @@
 // Everything above the platform stays pure.
 import { asset } from '@kit.AssetStoreKit'
 import { webSocket } from '@kit.NetworkKit'
-import { pasteboard } from '@kit.BasicServicesKit'
+import { pasteboard, BusinessError } from '@kit.BasicServicesKit'
 import { vibrator } from '@kit.SensorServiceKit'
 import { userAuth } from '@kit.UserAuthenticationKit'
 import { photoAccessHelper } from '@kit.MediaLibraryKit'
+import { fileIo } from '@kit.CoreFileKit'
 import { image } from '@kit.ImageKit'
 import { scanBarcode, scanCore } from '@kit.ScanKit'
 import { common, Want } from '@kit.AbilityKit'
@@ -397,16 +398,27 @@ export async function pickPhotos(onReady: (data: string) => void): Promise<void>
       const data = await compressImage(uri)
       if (data !== null && data !== '') {
         onReady(data)
+      } else {
+        hilog.warn(0x0000, 'DSBot', 'picked photo dropped (compress returned nothing): %{public}s', uri)
       }
     }
-  } catch {
+  } catch (error) {
     // The picker failed or was dismissed; nothing to attach.
+    const err = error as BusinessError
+    hilog.debug(0x0000, 'DSBot', 'photo picker ended: %{public}s', `${err.code ?? ''} ${err.message}`)
   }
 }
 
+// The picker hands back a media-store URI (file://media/...). The system only
+// honors the picker's read grant through the file API, so the image source is
+// built from the opened descriptor, never from the raw URI — passing the URI
+// string to createImageSource fails (FAQ faqs-media-library-27 / faqs-image-6
+// 方法二) and the silent catch made the photo never arrive.
 async function compressImage(uri: string): Promise<string | null> {
+  let file: fileIo.File | null = null
   try {
-    const source = image.createImageSource(uri)
+    file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY)
+    const source = image.createImageSource(file.fd)
     if (source === undefined) return null
     const info = await source.getImageInfo()
     const long = Math.max(info.size.width, info.size.height)
@@ -420,8 +432,18 @@ async function compressImage(uri: string): Promise<string | null> {
     pixelMap.release()
     await source.release()
     return base64Of(new Uint8Array(buffer))
-  } catch {
+  } catch (error) {
+    const err = error as BusinessError
+    hilog.warn(0x0000, 'DSBot', 'compressImage failed: %{public}s', `${err.code ?? ''} ${err.message}`)
     return null
+  } finally {
+    if (file !== null) {
+      try {
+        fileIo.closeSync(file)
+      } catch {
+        // The grant already lapsed; nothing to close.
+      }
+    }
   }
 }
 

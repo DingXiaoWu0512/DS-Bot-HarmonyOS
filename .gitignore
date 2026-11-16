@@ -1,6 +1,7 @@
 # Build outputs
 /build/
 /entry/build/
+/dist/
 /.hvigor/
 /.cache/
 

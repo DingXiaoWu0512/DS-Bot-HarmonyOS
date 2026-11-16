@@ -15,11 +15,20 @@ A **native HarmonyOS 5.0 (API 26)** port of the DS Bot mobile application. This 
 
 ## 📱 Screenshots
 
-| Bot List | Chat Interface | Settings |
-|:--------:|:--------------:|:--------:|
-| ![Bot List](entry/src/main/resources/base/media/app_icon.png) | ![Chat](entry/src/main/resources/base/media/app_icon.png) | ![Settings](entry/src/main/resources/base/media/app_icon.png) |
+Captured on a real HarmonyOS 5.0 device.
 
-*Screenshots coming soon — run the app in DevEco Studio preview or on device.*
+<table>
+  <tr>
+    <td align="center"><img src="docs/images/shot-1.jpg" width="180" alt="Side Chats"><br><b>Side Chats</b></td>
+    <td align="center"><img src="docs/images/shot-2.jpg" width="180" alt="Chat Interface"><br><b>Chat Interface</b></td>
+    <td align="center"><img src="docs/images/shot-3.jpg" width="180" alt="Bot Details"><br><b>Bot Details</b></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="docs/images/shot-4.jpg" width="180" alt="Conversation"><br><b>Conversation</b></td>
+    <td align="center"><img src="docs/images/shot-5.jpg" width="180" alt="Settings"><br><b>Settings</b></td>
+    <td align="center"></td>
+  </tr>
+</table>
 
 ---
 

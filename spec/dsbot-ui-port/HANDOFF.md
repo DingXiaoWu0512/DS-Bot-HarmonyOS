@@ -39,6 +39,7 @@
   10. ✅ via 标签 imPlatform 映射（`ChatRows.ets:564` `imPlatformName`）
   11. ✅ workPhrase `(said || note)` 语义（`phrases.ts:26`）
   12. ✅ TeamList 搜索 autoFocus（`defaultFocus(true)`，185 行）+ 磁贴/行按压反馈（tilePressed/pressed）
+  13. ✅ **选图无反应修复**（2026-11-16 用户反馈）：`Platform.ets` 的 `compressImage` 原先把 PhotoViewPicker 返回的 `file://media/...` URI 直接传 `image.createImageSource(uri)`，系统只认经 fileApi 的 picker 临时授权，导致失败被 `catch { return null }` 静默吞掉 → 选图点完成后界面无任何变化。已按官方 FAQ（faqs-media-library-27 / faqs-image-6 方法二）改为 `fileIo.openSync(uri, READ_ONLY)` 拿 fd → `createImageSource(file.fd)`，finally 中关闭 fd；catch 与 pickPhotos 均补 hilog 日志（`devecocli log --keyword DSBot` 可查）。`pickPhoto/pickAvatar`（BotEdit 头像）同路径一并修复。
 
 ### 未完成（本文档剩余部分即执行计划）
 
