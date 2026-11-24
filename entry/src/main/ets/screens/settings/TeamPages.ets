@@ -363,6 +363,9 @@ export struct Computers {
   private async forget(item: StoredComputer): Promise<void> {
     await appStore.computers.forget(item.hostDeviceId)
     await this.load()
+    // The forgotten computer may have been the active link: re-resolve the
+    // active computer and rebuild (or close) the link, like switchTo does.
+    appStore.ensureLink()
   }
 
   private addComputer(): void {

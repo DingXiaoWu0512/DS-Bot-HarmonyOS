@@ -9,7 +9,7 @@
 // answers reach this file only through common/team/chat-state's typed helpers,
 // never as raw unknowns.
 
-import { appStore, inkColor, type, radius, Palette } from '../../components/Theme'
+import { appStore, inkColor, type, radius, Palette, MONO } from '../../components/Theme'
 import { t, clockLabel, messageClock } from '../../common/ui/i18n'
 import type { Bot, ChatItem, FileRef, ImageRef } from '../../common/team/types'
 import {
@@ -340,6 +340,11 @@ export struct PhotoViewer {
       .index(this.open.index)
       .loop(false)
       .indicator(false)
+      .onChange((index: number) => {
+        // Swiping must drive the page counter and the active page's
+        // full-size load; .index() only sets the initial value.
+        this.at = index
+      })
       .width('100%')
       .height('100%')
 
@@ -473,14 +478,20 @@ export struct Item {
   @Param inRoom: boolean = false
   @Param sessionId: string = ''
   @Param stepsOpen: boolean = false
+  // The steps row's expanded tool index: -1 means every tool is collapsed.
+  @Param expandedTool: number = -1
   @Param stamp: string = ''
   @Param author: Bot | undefined = undefined
   @Param admin: boolean = false
   @Event onLongPress: (text: string) => void = (_text: string): void => {}
   @Event onToggleSteps: () => void = (): void => {}
+  @Event onToggleTool: (index: number) => void = (_index: number): void => {}
   @Event onOpenFile: (file: FileRef) => void = (_file: FileRef): void => {}
+  @Event onSaveFile: (file: FileRef) => void = (_file: FileRef): void => {}
   @Event onOpenPhoto: (index: number) => void = (_index: number): void => {}
   @Event onRetry: (localId: string, discard: boolean) => void = (_localId: string, _discard: boolean): void => {}
+  // The steps row whose Copy action just ran, so the label can say "Copied".
+  @Local copiedTool: number = -1
 
   private p(): Palette {
     return appStore.theme.p
@@ -491,6 +502,16 @@ export struct Item {
   }
 
   // ---- shared values -------------------------------------------------------
+
+  // Markdown image fetches go through the row's own session (a group reply may
+  // come from another session than the room being viewed).
+  private rowSessionId(): string {
+    return this.item.sessionId ?? this.sessionId
+  }
+
+  private authorBotId(): string {
+    return this.item.botId ?? this.author?.id ?? ''
+  }
 
   private wholeFile(): FileRef | undefined {
     const file = this.item.file
@@ -506,7 +527,8 @@ export struct Item {
       return texts.filter((entry: string): boolean => entry.trim() !== '')
     }
     const text = this.item.text ?? ''
-    if (text !== '') {
+    // Whitespace-only text renders an empty Markdown — a blank bubble; skip it.
+    if (text.trim() !== '') {
       return [this.wholeFile() !== undefined ? stripLongNote(text) : text]
     }
     return []
@@ -538,9 +560,24 @@ export struct Item {
   }
 
   private photosOnly(): boolean {
-    return (this.item.text ?? '') === ''
+    return (this.item.text ?? '').trim() === ''
       && (this.item.files ?? []).length === 0
       && ((this.item.imageRefs ?? []).length > 0 || (this.item.localImages ?? []).length > 0)
+  }
+
+  // A bubble with block content (code, table…) cannot hold it while wrapped to
+  // the text; the wide rules come from the RN build (items.tsx): a user bubble
+  // widens on its own text, a Bot row on any body part or its images.
+  private userWide(): boolean {
+    return hasBlockContent(this.item.text ?? '')
+  }
+
+  private roomHasImages(): boolean {
+    return (this.item.imageRefs ?? []).length > 0 && this.sessionId !== ''
+  }
+
+  private botWide(): boolean {
+    return this.bodyTexts().some((entry: string): boolean => hasBlockContent(entry)) || this.roomHasImages()
   }
 
   private bubblePadding(): Padding {
@@ -602,17 +639,21 @@ export struct Item {
 
   // ---- steps ---------------------------------------------------------------
 
+  // The caption over a turn's tools: a single tool shows its phrase (not "Used
+  // 1 tool"), several show the count, and steps without tools fall back to the
+  // thinking time alone.
   private stepsSummary(): string {
-    const count = (this.item.tools ?? []).length
-    const base = count === 1
-      ? t('Used {count} tool', { 'count': count })
-      : t('Used {count} tools', { 'count': count })
+    const tools = this.item.tools ?? []
     const ms = this.item.ms
     const seconds = typeof ms === 'number' ? Math.round(ms / 1000) : 0
-    if (seconds > 0) {
-      return `${base}${t(' · thought for {seconds}s', { 'seconds': seconds })}`
+    const thought = seconds > 0 ? t(' · thought for {seconds}s', { 'seconds': seconds }) : ''
+    if (tools.length === 1) {
+      return `${this.toolLine(tools[0])}${thought}`
     }
-    return base
+    if (tools.length === 0 && seconds > 0) {
+      return t('Thought for {seconds}s', { 'seconds': seconds })
+    }
+    return `${t('Used {count} tools', { 'count': tools.length })}${thought}`
   }
 
   private toolLine(tool: ToolEntry): string {
@@ -629,6 +670,22 @@ export struct Item {
     const detail = tool.detail
     if (detail === null || detail === undefined) return ''
     return detail.trim()
+  }
+
+  // Whether a tool carries a detail worth opening: no detail, no accordion.
+  private toolHasDetail(tool: ToolEntry): boolean {
+    return this.toolDetailOf(tool) !== ''
+  }
+
+  private copyToolDetail(tool: ToolEntry, index: number): void {
+    const detail = this.toolDetailOf(tool)
+    if (detail === '') return
+    void copyToClipboard(detail).then((): void => {
+      this.copiedTool = index
+      setTimeout((): void => {
+        if (this.copiedTool === index) this.copiedTool = -1
+      }, 1500)
+    })
   }
 
   // ---- group events --------------------------------------------------------
@@ -649,6 +706,12 @@ export struct Item {
         'count': this.item.ms ?? 0,
         'names': this.item.text ?? '',
       })
+    }
+    if (this.item.role === 'schedule') {
+      const text = this.item.text ?? ''
+      return text !== ''
+        ? t('Scheduled task: {text}', { 'text': text })
+        : t('Routine started')
     }
     const round = roundEventText(this.item.name ?? t('a Bot'), this.item.event, this.item.text, this.item.code)
     if (round !== undefined) return round
@@ -706,7 +769,8 @@ export struct Item {
     }
   }
 
-  // One folded caption row per turn: a tap lists what the tools did.
+  // One folded caption row per turn: a tap lists what the tools did, and each
+  // listed tool opens its full detail in its own accordion row.
   @Builder
   stepsRow() {
     Column({ space: 2 }) {
@@ -717,29 +781,75 @@ export struct Item {
         .textAlign(TextAlign.Center)
         .onClick((): void => this.onToggleSteps())
       if (this.stepsOpen) {
-        ForEach(this.item.tools ?? [], (tool: ToolEntry, index: number) => {
-          Column({ space: 1 }) {
-            Text(this.toolLine(tool))
-              .fontSize(type.caption.fontSize)
-              .lineHeight(type.caption.lineHeight)
-              .fontColor(this.p().ink2)
-              .textAlign(TextAlign.Center)
-            if (this.toolDetailOf(tool) !== '') {
-              Text(this.toolDetailOf(tool))
-                .fontSize(type.small.fontSize)
-                .lineHeight(type.small.lineHeight)
-                .fontColor(this.p().ink3)
-                .textAlign(TextAlign.Center)
-                .maxLines(2)
-                .textOverflow({ overflow: TextOverflow.Ellipsis })
-            }
-          }
-        }, (tool: ToolEntry, index: number): string => `${tool.name}-${index}`)
+        Column({ space: 3 }) {
+          ForEach(this.item.tools ?? [], (tool: ToolEntry, index: number) => {
+            this.toolBlock(tool, index)
+          }, (tool: ToolEntry, index: number): string => `${tool.name}-${index}`)
+        }
+        .width('100%')
+        .alignItems(HorizontalAlign.Start)
       }
     }
     .constraintSize({ maxWidth: '92%' })
     .alignSelf(ItemAlign.Center)
     .margin({ top: 4, bottom: 4 })
+  }
+
+  // One tool row of the expanded steps: the label (failed tools in the theme's
+  // danger color) with a one-line detail preview; a tap opens the tool's full
+  // detail — monospace, fully wrapped, with a copy action in the corner — and
+  // a tap on the label closes it again. A tool without detail stays a single
+  // line that does not expand.
+  @Builder
+  toolBlock(tool: ToolEntry, index: number) {
+    Column({ space: 2 }) {
+      Text(this.toolLine(tool))
+        .fontSize(type.caption.fontSize)
+        .lineHeight(type.caption.lineHeight)
+        .fontColor(tool.ok === false ? this.p().danger : this.p().ink2)
+        .textAlign(TextAlign.Start)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .width('100%')
+        .onClick((): void => {
+          if (this.toolHasDetail(tool)) this.onToggleTool(index)
+        })
+      if (this.expandedTool === index) {
+        Column({ space: 4 }) {
+          Text(this.toolDetailOf(tool))
+            .fontSize(type.small.fontSize)
+            .lineHeight(type.small.lineHeight)
+            .fontColor(tool.ok === false ? this.p().danger : this.p().ink2)
+            .fontFamily(MONO)
+            .textAlign(TextAlign.Start)
+            .width('100%')
+            .copyOption(CopyOptions.LocalDevice)
+          Text(this.copiedTool === index ? t('Copied') : t('Copy'))
+            .fontSize(type.caption.fontSize)
+            .lineHeight(type.caption.lineHeight)
+            .fontColor(this.p().ink3)
+            .alignSelf(ItemAlign.End)
+            .onClick((): void => this.copyToolDetail(tool, index))
+        }
+        .width('100%')
+        .padding({ left: 8, right: 8, top: 6, bottom: 6 })
+        .borderRadius(radius.input)
+        .backgroundColor(this.p().hover)
+        .alignItems(HorizontalAlign.Start)
+      } else if (this.toolHasDetail(tool)) {
+        Text(this.toolDetailOf(tool))
+          .fontSize(type.small.fontSize)
+          .lineHeight(type.small.lineHeight)
+          .fontColor(this.p().ink3)
+          .textAlign(TextAlign.Start)
+          .maxLines(1)
+          .textOverflow({ overflow: TextOverflow.Ellipsis })
+          .width('100%')
+          .onClick((): void => this.onToggleTool(index))
+      }
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 
   @Builder
@@ -1040,44 +1150,70 @@ export struct Item {
 
   @Builder
   userBubble() {
-    Column() {
-      if ((this.item.text ?? '') !== '') {
-        MarkdownText({ text: this.item.text ?? '', textColor: this.p().userInk, bg: this.p().user })
+    // A user message with a code block or table takes the full width, as a
+    // Bot's does: a bubble sized to its content cannot hold a block that
+    // scrolls sideways. The two branches share the content builder; only the
+    // width attribute differs (RN: width: wide ? maxWidth : undefined).
+    if (this.userWide()) {
+      Column() {
+        this.userBubbleContent()
       }
-      ForEach(this.item.files ?? [], (file: FileRef) => {
-        this.fileChip(file)
-      }, (file: FileRef): string => file.attachmentId ?? file.name)
-      if ((this.item.localImages ?? []).length > 0) {
-        LocalImages({ uris: this.item.localImages ?? [] })
-      } else if ((this.item.imageRefs ?? []).length > 0 && this.sessionId !== '') {
-        ImageGrid({
-          refs: this.item.imageRefs ?? [],
-          sessionId: this.sessionId,
-          onOpen: (index: number): void => this.onOpenPhoto(index),
-        })
-      } else if (this.item.images !== undefined && this.item.images > 0) {
-        Text(t('{count} images', { 'count': this.item.images }))
-          .fontSize(type.caption.fontSize)
-          .lineHeight(type.caption.lineHeight)
-          .fontColor(this.p().userInk)
-          .opacity(0.8)
-          .margin({ top: 4 })
+      .padding(this.bubblePadding())
+      .margin({ top: 2, bottom: 2 })
+      .borderRadius(radius.bubble)
+      .backgroundColor(this.photosOnly() ? 'transparent' : this.p().user)
+      .width(this.maxWidth)
+      .constraintSize({ maxWidth: this.maxWidth })
+      .alignSelf(ItemAlign.End)
+      .opacity(this.item.local === 'sending' ? 0.7 : 1)
+      .onClick((): void => this.userTap())
+      .gesture(LongPressGesture().onAction((): void => this.longPress()))
+    } else {
+      Column() {
+        this.userBubbleContent()
       }
+      .padding(this.bubblePadding())
+      .margin({ top: 2, bottom: 2 })
+      .borderRadius(radius.bubble)
+      .backgroundColor(this.photosOnly() ? 'transparent' : this.p().user)
+      .constraintSize({ maxWidth: this.maxWidth })
+      .alignSelf(ItemAlign.End)
+      .opacity(this.item.local === 'sending' ? 0.7 : 1)
+      .onClick((): void => this.userTap())
+      .gesture(LongPressGesture().onAction((): void => this.longPress()))
     }
-    .padding(this.bubblePadding())
-    .margin({ top: 2, bottom: 2 })
-    .borderRadius(radius.bubble)
-    .backgroundColor(this.photosOnly() ? 'transparent' : this.p().user)
-    .constraintSize({ maxWidth: this.maxWidth })
-    .alignSelf(ItemAlign.End)
-    .opacity(this.item.local === 'sending' ? 0.7 : 1)
-    .onClick((): void => this.userTap())
-    .gesture(LongPressGesture().onAction((): void => this.longPress()))
+  }
+
+  @Builder
+  userBubbleContent() {
+    if ((this.item.text ?? '').trim() !== '') {
+      MarkdownText({ text: this.item.text ?? '', textColor: this.p().userInk, bg: this.p().user,
+        sessionId: this.rowSessionId(), botId: this.authorBotId() })
+    }
+    ForEach(this.item.files ?? [], (file: FileRef) => {
+      this.fileChip(file)
+    }, (file: FileRef): string => file.attachmentId ?? file.name)
+    if ((this.item.localImages ?? []).length > 0) {
+      LocalImages({ uris: this.item.localImages ?? [] })
+    } else if ((this.item.imageRefs ?? []).length > 0 && this.sessionId !== '') {
+      ImageGrid({
+        refs: this.item.imageRefs ?? [],
+        sessionId: this.sessionId,
+        onOpen: (index: number): void => this.onOpenPhoto(index),
+      })
+    } else if (this.item.images !== undefined && this.item.images > 0) {
+      Text(t('{count} images', { 'count': this.item.images }))
+        .fontSize(type.caption.fontSize)
+        .lineHeight(type.caption.lineHeight)
+        .fontColor(this.p().userInk)
+        .opacity(0.8)
+        .margin({ top: 4 })
+    }
   }
 
   @Builder
   fileChip(file: FileRef) {
-    Row({ space: 8 }) {
+    Row() {
       Column({ space: 1 }) {
         Text(file.name)
           .fontSize(type.small.fontSize)
@@ -1091,17 +1227,29 @@ export struct Item {
           .lineHeight(type.caption.lineHeight)
           .fontColor(this.p().ink3)
       }
+      .constraintSize({ minHeight: 44 })
+      .justifyContent(FlexAlign.Center)
+      .padding({ left: 10, right: 10, top: 8, bottom: 8 })
       .layoutWeight(1)
       .alignItems(HorizontalAlign.Start)
+      .onClick((): void => this.onOpenFile(file))
+      Column() {
+        Text(t('Save'))
+          .fontSize(type.small.fontSize)
+          .lineHeight(type.small.lineHeight)
+          .fontWeight('600')
+          .fontColor(this.p().accent)
+          .padding({ left: 12, right: 12 })
+      }
+      .constraintSize({ minHeight: 44 })
+      .justifyContent(FlexAlign.Center)
+      .onClick((): void => this.onSaveFile(file))
     }
     .alignItems(VerticalAlign.Center)
-    .constraintSize({ minHeight: 44 })
-    .padding({ left: 10, right: 10, top: 8, bottom: 8 })
     .borderRadius(12)
     .border({ width: this.hairline(), color: this.p().line2 })
     .backgroundColor(this.p().card)
     .margin({ top: 6 })
-    .onClick((): void => this.onOpenFile(file))
   }
 
   // The images, file chips and full-message link that trail a Bot reply.
@@ -1176,7 +1324,8 @@ export struct Item {
 
         ForEach(this.bodyTexts(), (partText: string, partIndex: number) => {
           Column() {
-            MarkdownText({ text: partText, textColor: this.p().ink, bg: this.p().bubble })
+            MarkdownText({ text: partText, textColor: this.p().ink, bg: this.p().bubble,
+              sessionId: this.rowSessionId(), botId: this.authorBotId() })
             if (partIndex === this.bodyTexts().length - 1) {
               this.trailingBotContent()
             }
@@ -1186,7 +1335,8 @@ export struct Item {
           .borderRadius(radius.bubble)
           .backgroundColor(this.p().bubble)
           .constraintSize({ maxWidth: '100%' })
-          .alignSelf(hasBlockContent(partText) ? ItemAlign.Stretch : ItemAlign.Start)
+          .alignSelf(hasBlockContent(partText) || (partIndex === this.bodyTexts().length - 1 && this.roomHasImages())
+            ? ItemAlign.Stretch : ItemAlign.Start)
           .alignItems(HorizontalAlign.Start)
         }, (partText: string, partIndex: number): string => `${partIndex}-${partText}`)
 
@@ -1222,7 +1372,8 @@ export struct Item {
           .margin({ bottom: 2, left: 2 })
       }
       if (this.bodyJoined() !== '') {
-        MarkdownText({ text: this.bodyJoined(), textColor: this.p().ink, bg: this.p().main })
+        MarkdownText({ text: this.bodyJoined(), textColor: this.p().ink, bg: this.p().main,
+          sessionId: this.rowSessionId(), botId: this.authorBotId() })
       }
       this.trailingBotContent()
       if (this.stamp !== '') {
@@ -1241,37 +1392,57 @@ export struct Item {
 
   @Builder
   botBubbleRow() {
-    Column() {
-      if (this.inRoom && (this.item.name ?? '') !== '') {
-        Text(this.item.name)
-          .fontSize(type.caption.fontSize)
-          .lineHeight(type.caption.lineHeight)
-          .fontColor(this.p().ink3)
-          .margin({ bottom: 2, left: 2 })
-      }
+    // A Bot row with block content in any body part, or with images, takes
+    // the full width (RN items.tsx): width: wide ? maxWidth : undefined.
+    // The two branches share the content builder; only the width differs.
+    if (this.botWide()) {
       Column() {
-        if (this.bodyJoined() !== '') {
-          MarkdownText({ text: this.bodyJoined(), textColor: this.p().ink, bg: this.p().bubble })
-        }
-        this.trailingBotContent()
+        this.botBubbleContent()
       }
-      .padding({ left: 14, right: 14, top: 9, bottom: 9 })
-      .margin({ top: 2, bottom: 2 })
-      .borderRadius(radius.bubble)
-      .backgroundColor(this.p().bubble)
-      .constraintSize({ maxWidth: '100%' })
+      .width(this.maxWidth)
+      .constraintSize({ maxWidth: this.maxWidth })
+      .alignSelf(ItemAlign.Start)
       .alignItems(HorizontalAlign.Start)
-      if (this.stamp !== '') {
-        Text(this.stamp)
-          .fontSize(type.caption.fontSize)
-          .lineHeight(type.caption.lineHeight)
-          .fontColor(this.p().ink3)
-          .margin({ top: 2, left: 4 })
+      .gesture(LongPressGesture().onAction((): void => this.longPress()))
+    } else {
+      Column() {
+        this.botBubbleContent()
       }
+      .constraintSize({ maxWidth: this.maxWidth })
+      .alignSelf(ItemAlign.Start)
+      .alignItems(HorizontalAlign.Start)
+      .gesture(LongPressGesture().onAction((): void => this.longPress()))
     }
-    .constraintSize({ maxWidth: this.maxWidth })
-    .alignSelf(ItemAlign.Start)
+  }
+
+  @Builder
+  botBubbleContent() {
+    if (this.inRoom && (this.item.name ?? '') !== '') {
+      Text(this.item.name)
+        .fontSize(type.caption.fontSize)
+        .lineHeight(type.caption.lineHeight)
+        .fontColor(this.p().ink3)
+        .margin({ bottom: 2, left: 2 })
+    }
+    Column() {
+      if (this.bodyJoined() !== '') {
+        MarkdownText({ text: this.bodyJoined(), textColor: this.p().ink, bg: this.p().bubble,
+          sessionId: this.rowSessionId(), botId: this.authorBotId() })
+      }
+      this.trailingBotContent()
+    }
+    .padding({ left: 14, right: 14, top: 9, bottom: 9 })
+    .margin({ top: 2, bottom: 2 })
+    .borderRadius(radius.bubble)
+    .backgroundColor(this.p().bubble)
+    .constraintSize({ maxWidth: '100%' })
     .alignItems(HorizontalAlign.Start)
-    .gesture(LongPressGesture().onAction((): void => this.longPress()))
+    if (this.stamp !== '') {
+      Text(this.stamp)
+        .fontSize(type.caption.fontSize)
+        .lineHeight(type.caption.lineHeight)
+        .fontColor(this.p().ink3)
+        .margin({ top: 2, left: 4 })
+    }
   }
 }

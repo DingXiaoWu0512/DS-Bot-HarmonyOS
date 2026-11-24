@@ -8,7 +8,7 @@ import { pasteboard, BusinessError } from '@kit.BasicServicesKit'
 import { vibrator } from '@kit.SensorServiceKit'
 import { userAuth } from '@kit.UserAuthenticationKit'
 import { photoAccessHelper } from '@kit.MediaLibraryKit'
-import { fileIo } from '@kit.CoreFileKit'
+import { fileIo, picker } from '@kit.CoreFileKit'
 import { image } from '@kit.ImageKit'
 import { scanBarcode, scanCore } from '@kit.ScanKit'
 import { common, Want } from '@kit.AbilityKit'
@@ -323,25 +323,27 @@ class AuthResultCallback implements userAuth.IAuthCallback {
 
 async function ensureUnlock(endpoint: string): Promise<void> {
   if (!GATED.has(endpoint)) return
-  // Without an enrolled biometric there is no prompt to show; the caller
-  // surfaces the "set a screen lock" guidance instead of a failed prompt.
-  const types: userAuth.UserAuthType[] = [userAuth.UserAuthType.FACE, userAuth.UserAuthType.FINGERPRINT]
-  let enrolled = false
+  // Probe every lock type for an enrolled credential — a PIN alone still
+  // counts (a phone with only a PIN has no biometric prompt but a lock to
+  // check); without any enrolled lock there is no prompt to show and the
+  // caller surfaces the "set a screen lock" guidance instead.
+  const types: userAuth.UserAuthType[] =
+    [userAuth.UserAuthType.FACE, userAuth.UserAuthType.FINGERPRINT, userAuth.UserAuthType.PIN]
+  const enrolled: userAuth.UserAuthType[] = []
   for (const type of types) {
     try {
       userAuth.getAvailableStatus(type, userAuth.AuthTrustLevel.ATL1)
-      enrolled = true
-      break
+      enrolled.push(type)
     } catch {
       // This type is not enrolled.
     }
   }
-  if (!enrolled) throw new UnlockError('unlock/unavailable', 'Set a screen lock on this phone to do this')
+  if (enrolled.length === 0) throw new UnlockError('unlock/unavailable', 'Set a screen lock on this phone to do this')
   try {
     await new Promise<void>((resolve, reject) => {
       const authParam: userAuth.AuthParam = {
         challenge: new Uint8Array(0),
-        authType: types,
+        authType: enrolled,
         authTrustLevel: userAuth.AuthTrustLevel.ATL1,
       }
       const widgetParam: userAuth.WidgetParam = { title: t('Unlock to continue') }
@@ -386,11 +388,79 @@ export async function pickAvatar(context: common.UIAbilityContext): Promise<stri
   return data === null ? null : `data:image/jpeg;base64,${data}`
 }
 
+/**
+ * Picks library photos (several at once). Each arrives as a 160×160
+ * center-cropped JPEG data URL, the shape avatar-library.js avatarImage makes
+ * on the desktop, so the host's size cap holds for every import.
+ */
+export async function pickAvatarPhotos(onReady: (name: string, dataUrl: string) => void): Promise<void> {
+  const photoPicker = new photoAccessHelper.PhotoViewPicker()
+  try {
+    const result = await photoPicker.select({
+      MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE,
+      maxSelectNumber: 9,
+    })
+    for (const uri of result.photoUris) {
+      const dataUrl = await cropAvatarSquare(uri)
+      if (dataUrl !== null) {
+        const name = decodeURIComponent(uri.split('/').pop() ?? 'photo')
+        onReady(name, dataUrl)
+      } else {
+        hilog.warn(0x0000, 'DSBot', 'library photo dropped (crop returned nothing): %{public}s', uri)
+      }
+    }
+  } catch (error) {
+    // The picker failed or was dismissed; nothing to import.
+    const err = error as BusinessError
+    hilog.debug(0x0000, 'DSBot', 'library photo picker ended: %{public}s', `${err.code ?? ''} ${err.message}`)
+  }
+}
+
+// The picked photo cropped to a 160×160 square around its center, packed as
+// JPEG and wrapped in the data URL avatar-import takes.
+async function cropAvatarSquare(uri: string): Promise<string | null> {
+  let file: fileIo.File | null = null
+  try {
+    file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY)
+    const source = image.createImageSource(file.fd)
+    if (source === undefined) return null
+    const info = await source.getImageInfo()
+    const crop = Math.min(info.size.width, info.size.height)
+    const options: image.DecodingOptions = {
+      desiredSize: { width: 160, height: 160 },
+      desiredRegion: {
+        size: { width: crop, height: crop },
+        x: Math.round((info.size.width - crop) / 2),
+        y: Math.round((info.size.height - crop) / 2),
+      },
+    }
+    const pixelMap = await source.createPixelMap(options)
+    const packer = image.createImagePacker()
+    const buffer: ArrayBuffer = await packer.packToData(pixelMap, { format: 'image/jpeg', quality: 88 })
+    await packer.release()
+    pixelMap.release()
+    await source.release()
+    return `data:image/jpeg;base64,${base64Of(new Uint8Array(buffer))}`
+  } catch (error) {
+    const err = error as BusinessError
+    hilog.warn(0x0000, 'DSBot', 'cropAvatarSquare failed: %{public}s', `${err.code ?? ''} ${err.message}`)
+    return null
+  } finally {
+    if (file !== null) {
+      try {
+        fileIo.closeSync(file)
+      } catch {
+        // The grant already lapsed; nothing to close.
+      }
+    }
+  }
+}
+
 /** Picks images (several at once); each arrives as base64 JPEG with its long side at most 2048. */
 export async function pickPhotos(onReady: (data: string) => void): Promise<void> {
-  const picker = new photoAccessHelper.PhotoViewPicker()
+  const photoPicker = new photoAccessHelper.PhotoViewPicker()
   try {
-    const result = await picker.select({
+    const result = await photoPicker.select({
       MIMEType: photoAccessHelper.PhotoViewMIMETypes.IMAGE_TYPE,
       maxSelectNumber: 9,
     })
@@ -406,6 +476,80 @@ export async function pickPhotos(onReady: (data: string) => void): Promise<void>
     // The picker failed or was dismissed; nothing to attach.
     const err = error as BusinessError
     hilog.debug(0x0000, 'DSBot', 'photo picker ended: %{public}s', `${err.code ?? ''} ${err.message}`)
+  }
+}
+
+// ---- Files -----------------------------------------------------------------
+
+// The host's stage-file cap: the file's decoded size.
+const FILE_MAX_BYTES: number = 10 * 1024 * 1024
+
+/** One picked file, ready to stage: its name, decoded size, and base64 bytes. */
+export interface PickedFile {
+  name: string
+  bytes: number
+  data: string
+}
+
+/**
+ * Picks files (several at once) through the system document picker, the file
+ * twin of pickPhotos. Each file under the 10 MB cap arrives as base64 with its
+ * name and size; an oversized file is skipped and named on `onTooLarge`. A
+ * cancelled or failed picker adds nothing and is not an error.
+ */
+export async function pickFiles(onReady: (file: PickedFile) => void, onTooLarge: (name: string) => void): Promise<void> {
+  const docPicker: picker.DocumentViewPicker = new picker.DocumentViewPicker()
+  try {
+    const options: picker.DocumentSelectOptions = new picker.DocumentSelectOptions()
+    options.maxSelectNumber = 9
+    const uris: Array<string> = await docPicker.select(options)
+    for (const uri of uris) {
+      const name = decodeURIComponent(uri.split('/').pop() ?? 'file')
+      try {
+        const stat: fileIo.Stat = fileIo.statSync(uri)
+        if (stat.size > FILE_MAX_BYTES) {
+          onTooLarge(name)
+          continue
+        }
+        const data = readAllBytes(uri, stat.size)
+        if (data !== null) {
+          onReady({ name: name, bytes: stat.size, data: data })
+        } else {
+          hilog.warn(0x0000, 'DSBot', 'picked file dropped (read returned nothing): %{public}s', uri)
+        }
+      } catch (error) {
+        const err = error as BusinessError
+        hilog.warn(0x0000, 'DSBot', 'picked file could not be read: %{public}s', `${err.code ?? ''} ${err.message}`)
+      }
+    }
+  } catch (error) {
+    // The picker failed or was dismissed; nothing to attach.
+    const err = error as BusinessError
+    hilog.debug(0x0000, 'DSBot', 'file picker ended: %{public}s', `${err.code ?? ''} ${err.message}`)
+  }
+}
+
+// A picked file's whole content as base64. The picker's read grant only works
+// through the file API, so the bytes come from the opened descriptor.
+function readAllBytes(uri: string, size: number): string | null {
+  let file: fileIo.File | null = null
+  try {
+    file = fileIo.openSync(uri, fileIo.OpenMode.READ_ONLY)
+    const buffer: ArrayBuffer = new ArrayBuffer(size)
+    fileIo.readSync(file.fd, buffer)
+    return base64Of(new Uint8Array(buffer))
+  } catch (error) {
+    const err = error as BusinessError
+    hilog.warn(0x0000, 'DSBot', 'readAllBytes failed: %{public}s', `${err.code ?? ''} ${err.message}`)
+    return null
+  } finally {
+    if (file !== null) {
+      try {
+        fileIo.closeSync(file)
+      } catch {
+        // The grant already lapsed; nothing to close.
+      }
+    }
   }
 }
 
@@ -493,8 +637,9 @@ export function installPlatform(context: common.UIAbilityContext): void {
   taskContext = context
   const assetStore = new AssetStore()
   installSecureStore(assetStore)
-  installSeenStore(async (value: string) => {
-    await assetStore.set('dsbot.seenAt', value)
+  installSeenStore({
+    getItem: (key: string): Promise<string | null> => assetStore.get(key),
+    setItem: (key: string, value: string): Promise<void> => assetStore.set(key, value),
   })
   installSocketFactory(url => new HarmonySocket(url))
   installEnsureUnlock(ensureUnlock)

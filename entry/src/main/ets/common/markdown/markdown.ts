@@ -10,11 +10,18 @@ export interface MdToken {
   lang?: string
   ordered?: boolean
   start?: number
-  items?: MdToken[][]
+  items?: MdListItem[]
   tokens?: MdToken[]
   inline?: InlineToken[]
   header?: MdToken[]
   rows?: MdToken[][]
+}
+
+/** One list item: its block tokens and, for task items, the checkbox state. */
+export interface MdListItem {
+  tokens: MdToken[]
+  task?: boolean
+  checked?: boolean
 }
 
 export interface InlineToken {
@@ -25,7 +32,9 @@ export interface InlineToken {
   raw?: string
 }
 
-const ANCHOR = /[A-Za-z0-9]/
+// Any non-whitespace char can anchor an emphasis run — CJK included, matching
+// marked (the RN reference parser): "**加粗**" must parse, not stay literal.
+const ANCHOR = /\S/
 
 // Block-level lexing, line by line, close to marked's block rules for the subset.
 function lexBlocks(src: string, depth = 0): MdToken[] {
@@ -102,7 +111,7 @@ function lexBlocks(src: string, depth = 0): MdToken[] {
       const isOrdered = ordered.exec(line) !== null
       const indent = listMatch[1] ?? ''
       const itemIndent = indent.length
-      const items: MdToken[][] = []
+      const items: MdListItem[] = []
       let startNumber = isOrdered ? Number(ordered.exec(line)![2]) : 1
       while (at < lines.length) {
         const current = lines[at] ?? ''
@@ -112,12 +121,24 @@ function lexBlocks(src: string, depth = 0): MdToken[] {
         if (ordered.test(current) && !isOrdered) break
         const first = current.slice((m[1] ?? '').length + (m[2] ?? '').length + 1)
         const bodyLines = [first]
+        // Task item: a "[ ] "/"[x] " prefix on the first line. The prefix is
+        // stripped here so the body lexes clean and only the marker shows it.
+        const taskPrefix = /^\[([ xX])\] /.exec(first)
+        const task = taskPrefix !== null
+        const checked = taskPrefix !== null && (taskPrefix[1] ?? ' ') !== ' '
+        if (taskPrefix !== null) bodyLines[0] = first.slice(4)
         at += 1
         while (at < lines.length) {
           const next = lines[at] ?? ''
+          const contentCol = itemIndent + (m[2] ?? '').length + 1
           if (next.trim() === '') {
-            // A blank line ends the list unless the next line continues the item.
-            if (at + 1 < lines.length && ((bullet.exec(lines[at + 1] ?? '') ?? ordered.exec(lines[at + 1] ?? '')) !== null)) {
+            // A blank line ends the list unless the next line continues the
+            // item: another list marker, or any non-blank line indented to
+            // the item's content column (a loose item's paragraphs).
+            const after = at + 1 < lines.length ? lines[at + 1] ?? '' : ''
+            const afterList = bullet.exec(after) ?? ordered.exec(after)
+            const afterIndent = (after.match(/^[ \t]*/) ?? [''])[0].length
+            if (after.trim() !== '' && (afterList !== null || afterIndent >= contentCol)) {
               bodyLines.push('')
               at += 1
               continue
@@ -126,12 +147,20 @@ function lexBlocks(src: string, depth = 0): MdToken[] {
           }
           const nextList = bullet.exec(next) ?? ordered.exec(next)
           if (nextList !== null && (nextList[1] ?? '').length <= itemIndent) break
+          if (nextList !== null && (nextList[1] ?? '').length >= contentCol) {
+            // A nested list marker keeps its relative indent: strip only the
+            // item's own indent so the marker line becomes a nested list in
+            // the recursive lexBlocks, not a flattened sibling.
+            bodyLines.push(next.slice(itemIndent))
+            at += 1
+            continue
+          }
           // Continuation lines keep the item's text indent.
-          const strip = Math.min(itemIndent + (m[2] ?? '').length + 1, next.length)
+          const strip = Math.min(contentCol, next.length)
           bodyLines.push(next.length > strip && /^\s/.test(next) ? next.slice(strip) : next.replace(/^[ \t]+/, ''))
           at += 1
         }
-        items.push(lexBlocks(bodyLines.join('\n'), depth + 1).filter(token => token.type !== 'space'))
+        items.push({ tokens: lexBlocks(bodyLines.join('\n'), depth + 1).filter(token => token.type !== 'space'), task, checked })
       }
       tokens.push({ type: 'list', ordered: isOrdered, start: startNumber, items })
       void startNumber
@@ -155,13 +184,33 @@ function lexBlocks(src: string, depth = 0): MdToken[] {
     }
     // Paragraph: until a blank line or a block start.
     const body: string[] = []
+    let setextDepth = 0
     while (at < lines.length) {
       const current = lines[at] ?? ''
+      // A Setext underline (= or -) turns the collected lines into a heading;
+      // it must be checked before the hr rule so "Foo\n---" is a heading,
+      // not a paragraph plus a rule (marked's behavior).
+      if (body.length > 0) {
+        if (/^ {0,3}=+\s*$/.test(current)) {
+          setextDepth = 1
+          at += 1
+          break
+        }
+        if (/^ {0,3}-{2,}\s*$/.test(current)) {
+          setextDepth = 2
+          at += 1
+          break
+        }
+      }
       if (current.trim() === '') break
       if (/^(#{1,6})\s+/.test(current)) break
       if (/^ {0,3}(`{3,}|~{3,})/.test(current)) break
       if (/^ {0,3}>/.test(current)) break
       if (/^ {0,3}((?:\*[ \t]*){3,}|(?:-[ \t]*){3,}|(?:_[ \t]*){3,})$/.test(current)) break
+      // A list marker line interrupts the paragraph (marked's behavior):
+      // a bullet marker always, an ordered marker only when it starts at 1.
+      const orderedBreak = /^[ \t]*(\d{1,9})[.)]\s+\S/.exec(current)
+      if (/^[ \t]*[-*+]\s+\S/.test(current) || (orderedBreak !== null && Number(orderedBreak[1]) === 1)) break
       // A table header glued to the paragraph (no blank line before it) starts
       // a table when the next line is its delimiter row: stop so the table
       // branch consumes the header instead of stranding the delimiter row.
@@ -172,6 +221,11 @@ function lexBlocks(src: string, depth = 0): MdToken[] {
       }
       body.push(current)
       at += 1
+    }
+    if (setextDepth > 0) {
+      const text = body.join('\n')
+      tokens.push({ type: 'heading', depth: setextDepth, text, inline: lexInline(text) })
+      continue
     }
     if (body.length > 0) {
       const text = body.join('\n')
@@ -231,22 +285,32 @@ function lexInline(src: string): InlineToken[] {
       }
     }
     if (char === '*' || char === '_') {
-      const marker = char.repeat(2)
-      const closeAt = src.indexOf(marker, at + 2)
-      if (closeAt !== -1 && ANCHOR.test(src.charAt(at + 2) || ' ')) {
-        flush()
-        const inner = src.slice(at + 2, closeAt)
-        tokens.push({ type: 'strong', text: inner, tokens: lexInline(inner) })
-        at = closeAt + 2
-        continue
-      }
-      const closeSingle = src.indexOf(char, at + 1)
-      if (closeSingle !== -1 && ANCHOR.test(src.charAt(at + 1) || ' ')) {
-        flush()
-        const inner = src.slice(at + 1, closeSingle)
-        tokens.push({ type: 'em', text: inner, tokens: lexInline(inner) })
-        at = closeSingle + 1
-        continue
+      // A `_` emphasis run never opens right after a word character, so
+      // my_var_name stays literal; `*` keeps allowing intraword runs.
+      const intraword = char === '_'
+      const before = at > 0 ? src.charAt(at - 1) : ''
+      if (!intraword || !/[0-9A-Za-z]/.test(before)) {
+        const marker = char.repeat(2)
+        const closeAt = src.indexOf(marker, at + 2)
+        // Both ends must anchor on non-whitespace and the content must be
+        // non-empty; a `_` run also never closes right before a word char.
+        if (closeAt > at + 2 && ANCHOR.test(src.charAt(at + 2) || ' ') && ANCHOR.test(src.charAt(closeAt - 1) || ' ')
+          && (!intraword || !/[0-9A-Za-z]/.test(src.charAt(closeAt + 2)))) {
+          flush()
+          const inner = src.slice(at + 2, closeAt)
+          tokens.push({ type: 'strong', text: inner, tokens: lexInline(inner) })
+          at = closeAt + 2
+          continue
+        }
+        const closeSingle = src.indexOf(char, at + 1)
+        if (closeSingle > at + 1 && ANCHOR.test(src.charAt(at + 1) || ' ') && ANCHOR.test(src.charAt(closeSingle - 1) || ' ')
+          && (!intraword || !/[0-9A-Za-z]/.test(src.charAt(closeSingle + 1)))) {
+          flush()
+          const inner = src.slice(at + 1, closeSingle)
+          tokens.push({ type: 'em', text: inner, tokens: lexInline(inner) })
+          at = closeSingle + 1
+          continue
+        }
       }
     }
     if (char === '~' && src.charAt(at + 1) === '~') {
@@ -271,8 +335,16 @@ function lexInline(src: string): InlineToken[] {
       continue
     }
     if (char === '\n') {
-      flush()
-      tokens.push({ type: 'br' })
+      // Two or more trailing spaces make a hard break; a lone newline inside
+      // a paragraph stays in the text token and renders as a real line break
+      // on the phone (normalizeSoftBreaks keeps it).
+      if (/ {2,}$/.test(text)) {
+        text = text.replace(/ +$/, '')
+        flush()
+        tokens.push({ type: 'br' })
+      } else {
+        text += '\n'
+      }
       at += 1
       continue
     }

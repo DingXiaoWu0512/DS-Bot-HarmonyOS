@@ -166,7 +166,16 @@ const prefListeners = new Set<() => void>()
 export async function readPrefs(): Promise<Record<string, string>> {
   if (prefsCache !== null) return prefsCache
   const text = await requireStore().get(PREFS)
-  prefsCache = (text === null ? {} : (JSON.parse(text) as Record<string, string>)) ?? {}
+  if (text !== null) {
+    try {
+      prefsCache = (JSON.parse(text) as Record<string, string>) ?? {}
+    } catch {
+      // Corrupt stored prefs never crash the app: start from a clean slate.
+      prefsCache = {}
+    }
+    return prefsCache
+  }
+  prefsCache = {}
   return prefsCache
 }
 

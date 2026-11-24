@@ -11,8 +11,11 @@ import { BusinessError } from '@kit.BasicServicesKit'
 
 import { appStore, type, radius, Palette, MONO, shadowOf } from '../../components/Theme'
 import { t } from '../../common/ui/i18n'
-import type { Approval, Bot, Question, SecretRequest, ShownView } from '../../common/team/types'
+import type { Approval, Bot, ConnectorRequest, Question, SecretRequest, ShownView } from '../../common/team/types'
+import { connectorCanConnectOnMobile } from '../../common/team/connectors'
 import { shownViewNode } from '../../common/team/chat-state'
+import { agentEditRows, lineDiff } from '../../common/team/learning'
+import type { DiffRow, LearningProposal } from '../../common/team/learning'
 import type { ViewNode } from '../../common/deepview/views-core'
 import { hapticLight, hapticSuccess } from '../../platform/Platform'
 import { DeepView } from './DeepView'
@@ -23,7 +26,12 @@ import { Avatar } from '../../components/Marks'
 const EMPTY_VIEW_NODE: ViewNode = {}
 const EMPTY_APPROVAL: Approval = { id: '', sessionId: '', botId: '', tool: '', reason: '' }
 const EMPTY_SECRET: SecretRequest = { id: '' }
+const EMPTY_CONNECTOR: ConnectorRequest = { id: '', connectorId: '' }
 const EMPTY_BTW: BtwCardData = { id: '' }
+const EMPTY_LEARNING: LearningProposal = { id: '', botId: '' }
+
+// Learning rows are folded past this count until expanded (dock.tsx).
+const LEARNING_COLLAPSE_ROWS: number = 8
 
 // An aside the Bot parked beside the chat (team.btwCards entry).
 export interface BtwCardData {
@@ -61,7 +69,11 @@ export struct Dock {
   @Param question: Question | undefined = undefined
   @Require @Param sessionId: string
   @Param approvals: Approval[] = []
+  @Param learning: LearningProposal[] = []
   @Param secrets: SecretRequest[] = []
+  @Param connectorRequests: ConnectorRequest[] = []
+  @Param botName: string = ''
+  @Event onOpenConnector: (connectorId: string) => void = (_connectorId: string): void => {}
   @Param btw: BtwCardData[] = []
   @Param handoff: HandoffData | undefined = undefined
   @Param view: ShownView | undefined = undefined
@@ -91,6 +103,12 @@ export struct Dock {
 
   private metas(): DockCardMeta[] {
     const out: DockCardMeta[] = []
+    for (const proposal of this.learning) {
+      const title = proposal.kind === 'agents'
+        ? t('AGENTS.md update')
+        : `${t(proposal.action === 'update' ? 'Skill update' : 'New skill')} · ${proposal.name ?? ''}`
+      out.push({ key: `learning-${proposal.id}`, title, needs: true })
+    }
     for (const approval of this.approvals) {
       out.push({
         key: `approval-${approval.id}`,
@@ -111,6 +129,14 @@ export struct Dock {
         ? t('Allow a secret')
         : (name !== '' ? t('{name} needs a key', { 'name': name }) : t('A secret is needed'))
       out.push({ key: `secret-${secret.id}`, title, needs: true })
+    }
+    for (const request of this.connectorRequests) {
+      const name = request.name ?? ''
+      const title = t('{bot} needs {name}', {
+        'bot': this.botName !== '' ? this.botName : t('the Bot'),
+        'name': name !== '' ? name : request.connectorId,
+      })
+      out.push({ key: `connector-${request.id}`, title, needs: true })
     }
     if (this.handoff !== undefined) {
       out.push({ key: 'handoff', title: t('Browser handoff'), needs: true })
@@ -159,10 +185,26 @@ export struct Dock {
     return undefined
   }
 
+  private entryLearning(key: string): LearningProposal | undefined {
+    const id = key.slice('learning-'.length)
+    for (const proposal of this.learning) {
+      if (proposal.id === id) return proposal
+    }
+    return undefined
+  }
+
   private entrySecret(key: string): SecretRequest | undefined {
     const id = key.slice('secret-'.length)
     for (const secret of this.secrets) {
       if (secret.id === id) return secret
+    }
+    return undefined
+  }
+
+  private entryConnector(key: string): ConnectorRequest | undefined {
+    const id = key.slice('connector-'.length)
+    for (const request of this.connectorRequests) {
+      if (request.id === id) return request
     }
     return undefined
   }
@@ -254,7 +296,11 @@ export struct Dock {
 
   @Builder
   cardBody(key: string) {
-    if (key.startsWith('approval-')) {
+    if (key.startsWith('learning-')) {
+      if (this.entryLearning(key) !== undefined) {
+        LearningCard({ proposal: this.entryLearning(key) ?? EMPTY_LEARNING })
+      }
+    } else if (key.startsWith('approval-')) {
       if (this.entryApproval(key) !== undefined) {
         ApprovalCard({ approval: this.entryApproval(key) ?? EMPTY_APPROVAL, bare: true })
       }
@@ -265,6 +311,14 @@ export struct Dock {
     } else if (key.startsWith('secret-')) {
       if (this.entrySecret(key) !== undefined) {
         SecretCard({ secret: this.entrySecret(key) ?? EMPTY_SECRET, bare: true })
+      }
+    } else if (key.startsWith('connector-')) {
+      if (this.entryConnector(key) !== undefined) {
+        ConnectorRequestCard({
+          request: this.entryConnector(key) ?? EMPTY_CONNECTOR,
+          onConnect: (connectorId: string): void => this.onOpenConnector(connectorId),
+          bare: true,
+        })
       }
     } else if (key === 'handoff') {
       if (this.handoff !== undefined) {
@@ -289,6 +343,176 @@ export struct Dock {
         BtwCard({ card: this.entryBtw(key) ?? EMPTY_BTW, sessionId: this.sessionId, bare: true })
       }
     }
+  }
+}
+
+// A learning proposal awaiting approval (chat/learning.ts): the file it
+// touches as a diff — an AGENTS.md proposal's edits as removals and
+// additions, a skill's content against its previous text — folded past 8
+// rows and answered Approve / Decline through learning-answer, which the
+// link gates behind the phone's unlock.
+@ComponentV2
+export struct LearningCard {
+  @Require @Param proposal: LearningProposal
+  @Local busy: boolean = false
+  @Local error: string = ''
+  @Local showAll: boolean = false
+
+  private p(): Palette {
+    return appStore.theme.p
+  }
+
+  @Computed
+  get rows(): DiffRow[] {
+    if (this.proposal.kind === 'agents') {
+      const out: DiffRow[] = []
+      for (const edit of this.proposal.edits ?? []) {
+        for (const row of agentEditRows(edit)) out.push(row)
+      }
+      return out
+    }
+    const previous: string = this.proposal.action === 'update' ? (this.proposal.previous?.content ?? '') : ''
+    return lineDiff(previous, this.proposal.content ?? '')
+  }
+
+  private folds(): boolean {
+    return this.rows.length > LEARNING_COLLAPSE_ROWS
+  }
+
+  private visibleRows(): DiffRow[] {
+    if (this.folds() && !this.showAll) {
+      return this.rows.slice(0, LEARNING_COLLAPSE_ROWS)
+    }
+    return this.rows
+  }
+
+  private filePath(): string {
+    return this.proposal.kind === 'agents'
+      ? (this.proposal.folder ?? '')
+      : `skills/${this.proposal.name ?? ''}/SKILL.md`
+  }
+
+  private whys(): string[] {
+    const out: string[] = []
+    if (this.proposal.kind === 'agents') {
+      for (const edit of this.proposal.edits ?? []) {
+        const why = edit.why ?? ''
+        if (why !== '') out.push(why)
+      }
+    } else {
+      const why = this.proposal.why ?? ''
+      if (why !== '') out.push(why)
+    }
+    return out
+  }
+
+  private answer(approve: boolean): void {
+    if (this.busy) return
+    this.busy = true
+    this.error = ''
+    const controller = appStore.link.controller
+    if (controller === null) {
+      this.error = t('Not connected')
+      this.busy = false
+      return
+    }
+    const payload: Record<string, Object> = { 'id': this.proposal.id, 'approve': approve }
+    void controller.call('learning-answer', payload).then((): void => {
+      this.busy = false
+    }).catch((failure: BusinessError): void => {
+      const code = `${failure.code ?? ''}`
+      if (code !== 'unlock/canceled') {
+        this.error = `${failure.message ?? code}`
+      }
+      this.busy = false
+    })
+  }
+
+  build() {
+    Column() {
+      Text(t('Awaiting approval'))
+        .fontSize(type.caption.fontSize)
+        .lineHeight(type.caption.lineHeight)
+        .fontColor(this.p().ink2)
+      Text(this.filePath())
+        .fontSize(type.small.fontSize)
+        .lineHeight(type.small.lineHeight)
+        .fontColor(this.p().ink)
+        .margin({ top: 8 })
+      if ((this.proposal.description ?? '') !== '') {
+        Text(this.proposal.description ?? '')
+          .fontSize(type.small.fontSize)
+          .lineHeight(type.small.lineHeight)
+          .fontColor(this.p().ink2)
+          .margin({ top: 6 })
+      }
+      Column() {
+        ForEach(this.visibleRows(), (row: DiffRow) => {
+          Text(`${row.kind === 'added' ? '+ ' : row.kind === 'removed' ? '\u2212 ' : '  '}${row.line}`)
+            .fontFamily(MONO)
+            .fontSize(12)
+            .lineHeight(19)
+            .fontColor(row.kind === 'removed' ? this.p().danger : this.p().ink)
+            .backgroundColor(row.kind === 'added' ? this.p().hover : Color.Transparent)
+        }, (row: DiffRow, index: number): string => `${index}`)
+        if (this.folds()) {
+          Text(this.showAll ? t('Show less') : t('Show all {count} lines', { 'count': this.rows.length }))
+            .fontSize(type.caption.fontSize)
+            .lineHeight(type.caption.lineHeight)
+            .fontColor(this.p().accent)
+            .margin({ top: 6 })
+            .padding({ top: 4, bottom: 4 })
+            .onClick((): void => {
+              this.showAll = !this.showAll
+            })
+        }
+      }
+      .alignItems(HorizontalAlign.Start)
+      .margin({ top: 8 })
+      ForEach(this.whys(), (why: string) => {
+        Text(why)
+          .fontSize(type.small.fontSize)
+          .lineHeight(type.small.lineHeight)
+          .fontColor(this.p().ink2)
+          .margin({ top: 8 })
+      }, (why: string): string => why)
+      if (this.error !== '') {
+        Text(this.error)
+          .fontSize(type.small.fontSize)
+          .lineHeight(type.small.lineHeight)
+          .fontColor(this.p().danger)
+          .margin({ top: 8 })
+      }
+      Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+        Text(t('Decline'))
+          .fontSize(14)
+          .fontColor(this.p().ink)
+          .backgroundColor(this.p().hover)
+          .borderRadius(radius.pill)
+          .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+          .constraintSize({ minHeight: 44, minWidth: 104 })
+          .layoutWeight(1)
+          .textAlign(TextAlign.Center)
+          .opacity(this.busy ? 0.35 : 1)
+          .margin({ right: 8 })
+          .onClick((): void => this.answer(false))
+        Text(t('Approve'))
+          .fontSize(14)
+          .fontWeight('600')
+          .fontColor(this.p().accentInk)
+          .backgroundColor(this.p().accent)
+          .borderRadius(radius.pill)
+          .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+          .constraintSize({ minHeight: 44, minWidth: 104 })
+          .layoutWeight(1)
+          .textAlign(TextAlign.Center)
+          .opacity(this.busy ? 0.35 : 1)
+          .onClick((): void => this.answer(true))
+      }
+      .margin({ top: 12 })
+    }
+    .width('100%')
+    .alignItems(HorizontalAlign.Start)
   }
 }
 
@@ -473,6 +697,14 @@ export struct ApprovalCard {
     return this.getUIContext().px2vp(1)
   }
 
+  // [taskTitle, tool or 'Approval'] — what the approval is for, joined.
+  private titleText(): string {
+    const parts: string[] = []
+    if ((this.approval.taskTitle ?? '') !== '') parts.push(this.approval.taskTitle ?? '')
+    parts.push(this.approval.tool !== '' ? this.approval.tool : 'Approval')
+    return parts.join(' · ')
+  }
+
   private answer(choice: string): void {
     if (this.busy) return
     this.busy = true
@@ -503,7 +735,7 @@ export struct ApprovalCard {
       .alignItems(HorizontalAlign.Start)
     } else {
       Column() {
-        Text(this.approval.tool !== '' ? this.approval.tool : 'Approval')
+        Text(this.titleText())
           .fontSize(type.settingsRow.fontSize)
           .lineHeight(type.settingsRow.lineHeight)
           .fontWeight('600')
@@ -524,12 +756,22 @@ export struct ApprovalCard {
 
   @Builder
   cardBody() {
+    if (this.bare && (this.approval.taskTitle ?? '') !== '') {
+      Text(this.approval.taskTitle ?? '')
+        .fontSize(type.caption.fontSize)
+        .lineHeight(type.caption.lineHeight)
+        .fontColor(this.p().ink2)
+        .maxLines(1)
+        .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .margin({ bottom: 2 })
+    }
     if ((this.approval.detail?.text ?? '') !== '') {
       Text(this.approval.detail?.text ?? '')
         .fontSize(type.small.fontSize)
         .lineHeight(type.small.lineHeight)
         .fontColor(this.p().ink)
         .margin({ top: 4 })
+        .copyOption(CopyOptions.LocalDevice)
     }
     if (this.approval.reason !== '') {
       Text(this.approval.reason)
@@ -539,6 +781,7 @@ export struct ApprovalCard {
         .margin({ top: 4 })
         .maxLines(4)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
+        .copyOption(CopyOptions.LocalDevice)
     }
     if ((this.approval.detail?.code ?? '') !== '') {
       Text(this.approval.detail?.code ?? '')
@@ -549,6 +792,7 @@ export struct ApprovalCard {
         .maxLines(3)
         .textOverflow({ overflow: TextOverflow.Ellipsis })
         .fontFamily(MONO)
+        .copyOption(CopyOptions.LocalDevice)
     }
     if (this.approval.answerable === true) {
       Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
@@ -770,6 +1014,137 @@ export struct SecretCard {
     const scope = this.secret.scope
     if (Array.isArray(scope)) return scope.join(', ')
     return scope ?? ''
+  }
+}
+
+// The Bot asked to use a connector (mail and friends): dismiss it here, or
+// open the connector's setup screen when the phone can connect it.
+@ComponentV2
+export struct ConnectorRequestCard {
+  @Require @Param request: ConnectorRequest
+  @Event onConnect: (connectorId: string) => void = (_connectorId: string): void => {}
+  @Param bare: boolean = false
+  @Local busy: boolean = false
+  @Local failed: boolean = false
+
+  private p(): Palette {
+    return appStore.theme.p
+  }
+
+  private hairline(): number {
+    return this.getUIContext().px2vp(1)
+  }
+
+  private mobileSupported(): boolean {
+    return connectorCanConnectOnMobile(this.request.connectorId)
+  }
+
+  private dismiss(): void {
+    if (this.busy) return
+    this.busy = true
+    this.failed = false
+    const controller = appStore.link.controller
+    if (controller === null) {
+      this.failed = true
+      this.busy = false
+      return
+    }
+    const payload: Record<string, Object> = { 'requestId': this.request.id }
+    void controller.call('connector-request-cancel', payload).then((): void => {
+      this.busy = false
+    }).catch((failure: BusinessError): void => {
+      this.failed = true
+      this.busy = false
+    })
+  }
+
+  build() {
+    if (this.bare) {
+      Column() {
+        this.cardBody()
+      }
+      .width('100%')
+      .alignItems(HorizontalAlign.Start)
+    } else {
+      Column() {
+        Text(t('{bot} needs {name}', {
+          'bot': t('the Bot'),
+          'name': this.request.name ?? this.request.connectorId,
+        }))
+          .fontSize(type.settingsRow.fontSize)
+          .lineHeight(type.settingsRow.lineHeight)
+          .fontWeight('600')
+          .fontColor(this.p().ink)
+        this.cardBody()
+      }
+      .width('calc(100% - 24vp)')
+      .alignItems(HorizontalAlign.Start)
+      .margin({ left: 12, right: 12, top: 6, bottom: 6 })
+      .borderRadius(radius.card)
+      .border({ width: this.hairline(), color: this.p().line })
+      .backgroundColor(this.p().card)
+      .padding({ left: 16, right: 16, top: 14, bottom: 14 })
+      .shadow(shadowOf(1))
+    }
+  }
+
+  @Builder
+  cardBody() {
+    if (this.request.purpose !== undefined && this.request.purpose !== '') {
+      Text(this.request.purpose)
+        .fontSize(type.small.fontSize)
+        .lineHeight(type.small.lineHeight)
+        .fontColor(this.p().ink2)
+        .margin({ top: this.bare ? 0 : 4 })
+    }
+    if (!this.mobileSupported()) {
+      Text(t('Set up your mailbox on the computer.'))
+        .fontSize(type.small.fontSize)
+        .lineHeight(type.small.lineHeight)
+        .fontColor(this.p().ink2)
+        .margin({ top: 8 })
+    }
+    Flex({ direction: FlexDirection.Row, wrap: FlexWrap.Wrap, alignItems: ItemAlign.Center }) {
+      Text(t('Dismiss'))
+        .fontSize(14)
+        .fontColor(this.p().ink)
+        .backgroundColor(this.p().hover)
+        .borderRadius(radius.pill)
+        .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+        .constraintSize({ minHeight: 44, minWidth: 104 })
+        .layoutWeight(1)
+        .textAlign(TextAlign.Center)
+        .opacity(this.busy ? 0.35 : 1)
+        .margin({ right: 8 })
+        .onClick((): void => {
+          this.dismiss()
+        })
+      if (this.mobileSupported()) {
+        Text(t('Connect'))
+          .fontSize(14)
+          .fontWeight('600')
+          .fontColor(this.p().accentInk)
+          .backgroundColor(this.p().accent)
+          .borderRadius(radius.pill)
+          .padding({ left: 14, right: 14, top: 8, bottom: 8 })
+          .constraintSize({ minHeight: 44, minWidth: 104 })
+          .layoutWeight(1)
+          .textAlign(TextAlign.Center)
+          .opacity(this.busy ? 0.35 : 1)
+          .onClick((): void => {
+            this.onConnect(this.request.connectorId)
+          })
+      }
+    }
+    .margin({ top: 12 })
+
+    if (this.failed) {
+      Text(t('This approval is no longer open.'))
+        .fontSize(type.small.fontSize)
+        .lineHeight(type.small.lineHeight)
+        .fontColor(this.p().danger)
+        .margin({ top: 8 })
+    }
   }
 }
 

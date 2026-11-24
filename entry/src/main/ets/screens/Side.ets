@@ -96,11 +96,20 @@ export struct Side {
     return this.openChat()?.entries ?? []
   }
 
-  private running(): boolean {
+  // True while any side-chat entry is answering; drives the short poll.
+  @Computed
+  get running(): boolean {
     for (const entry of this.entries()) {
       if (entry.status === 'answering') return true
     }
     return false
+  }
+
+  // The computed flips when an answer starts or ends; the monitor keeps the
+  // short poll in step with it.
+  @Monitor('running')
+  onRunningChange(): void {
+    this.setPolling(this.running)
   }
 
   private hairline(): number {

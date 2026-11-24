@@ -19,19 +19,49 @@ export interface MessageRow {
   key: string
   stamp: string
   stepsOpen: boolean
+  // The steps row's expanded tool index: -1 means every tool is collapsed.
+  expandedTool: number
   maxWidth: number
   author: Bot | undefined
   admin: boolean
 }
 
+// Scroll positions remembered across chat switches and reconnects, so reading
+// history stays where the user scrolled when new replies or state refreshes
+// land (Chat.tsx scrollOffsets). Kept in memory only.
+const SCROLL_OFFSETS_KEPT: number = 50
+const scrollOffsets: Map<string, number> = new Map<string, number>()
+const scrollOrder: string[] = []
+function keepScrollOffset(key: string, offset: number): void {
+  const at: number = scrollOrder.indexOf(key)
+  if (at >= 0) scrollOrder.splice(at, 1)
+  scrollOrder.push(key)
+  scrollOffsets.set(key, Math.max(0, offset))
+  if (scrollOrder.length > SCROLL_OFFSETS_KEPT) {
+    const oldest: string | undefined = scrollOrder.shift()
+    if (oldest !== undefined) scrollOffsets.delete(oldest)
+  }
+}
+
 // LazyForEach only re-renders an item when its key changes, so the mutable
-// bits ride along in the key: the steps fold state, the streaming bubble's
-// growing text, and an author photo landing from the avatar cache.
+// bits ride along in the key: the steps fold state, the row's expanded tool,
+// the streaming bubble's growing text, an author photo landing from the
+// avatar cache — and a content signature (file/image counts, the whole-file
+// link, the stamp, the local send state, the text size) so a row whose
+// content changed in place rebuilds without scrolling away first.
 function rowKeyOf(row: MessageRow): string {
   let key = row.key
   if (row.stepsOpen) key += '+open'
+  if (row.expandedTool >= 0) key += `+t${row.expandedTool}`
   if (row.key === 'streaming') key += `#${(row.item.text ?? '').length}`
   if (row.author?.avatar?.image !== undefined) key += '+img'
+  const item = row.item
+  key += `+f${(item.files ?? []).length}`
+  key += `+i${(item.imageRefs ?? []).length + (item.images ?? 0)}`
+  key += `+w${item.whole !== undefined ? 1 : 0}`
+  key += `+s${row.stamp}`
+  key += `+l${item.local ?? ''}`
+  key += `+x${(item.text ?? '').length}`
   return key
 }
 
@@ -163,6 +193,7 @@ class RowsSource implements IDataSource {
 export struct MessageList {
   @Require @Param rows: MessageRow[]
   @Require @Param sessionId: string
+  @Param chatKey: string = ''
   @Param flat: boolean = false
   @Param inRoom: boolean = false
   @Param loadingOlder: boolean = false
@@ -170,19 +201,52 @@ export struct MessageList {
   @Event onLongPress: (text: string) => void = (_text: string): void => {}
   @Event onOpenPhoto: (open: PhotoOpenData) => void = (_open: PhotoOpenData): void => {}
   @Event onOpenFile: (file: FileRef) => void = (_file: FileRef): void => {}
+  @Event onSaveFile: (file: FileRef) => void = (_file: FileRef): void => {}
   @Event onRetry: (localId: string, discard: boolean) => void = (_localId: string, _discard: boolean): void => {}
   @Event onToggleSteps: (rowKey: string) => void = (_rowKey: string): void => {}
+  @Event onToggleTool: (rowKey: string, index: number) => void = (_rowKey: string, _index: number): void => {}
 
   @Local away: boolean = false
+  @Local unread: number = 0
   private scroller: Scroller = new Scroller()
   private source: RowsSource = new RowsSource()
   private firstVisible: number = 0
   private nearBottom: boolean = true
   private areaHeight: number = 0
   private lastLoadAt: number = 0
+  private restoredFor: string = ''
+  // A dock snap in flight: onScrollStop must not start another one until the
+  // running snap reaches the resting offset (where the test itself fails).
+  private snapping: boolean = false
 
   aboutToAppear(): void {
     this.source.setRows(this.rows)
+    this.tryRestore()
+  }
+
+  // A chat switch resets the reading state; the saved offset of the new chat
+  // restores once its rows have landed.
+  @Monitor('chatKey')
+  onChatKeyChange(): void {
+    this.unread = 0
+    this.away = false
+    this.nearBottom = true
+    this.firstVisible = 0
+    this.snapping = false
+  }
+
+  // Puts the chat back where it was left, once per chat: no offset saved means
+  // the newest row (index 0) is the place to be.
+  private tryRestore(): void {
+    if (this.restoredFor === this.chatKey || this.chatKey === '') return
+    if (this.source.count() === 0) return
+    const saved: number = scrollOffsets.get(this.chatKey) ?? 0
+    this.restoredFor = this.chatKey
+    if (saved > 0) {
+      setTimeout((): void => {
+        this.scroller.scrollTo({ xOffset: 0, yOffset: saved, animation: false })
+      }, 60)
+    }
   }
 
   // The lazy list is fed here whenever Chat hands over a new rows array. A
@@ -194,7 +258,18 @@ export struct MessageList {
   onRowsChange(): void {
     const prevFirst = this.firstVisible
     const prepended = this.source.setRows(this.rows)
+    this.tryRestore()
     if (prepended > 0 && this.source.count() > 0) {
+      // New rows landing while reading history count up in the pill (the
+      // streaming bubble is not a new message).
+      if (this.away) {
+        let fresh: number = 0
+        for (let i = 0; i < prepended; i++) {
+          const row: MessageRow | undefined = this.rows[i]
+          if (row !== undefined && row.key !== 'streaming') fresh += 1
+        }
+        this.unread += fresh
+      }
       const head = this.rows[0]
       if (this.nearBottom || (head !== undefined && head.item.local !== undefined)) {
         this.scroller.scrollToIndex(0, true)
@@ -254,12 +329,15 @@ export struct MessageList {
                 inRoom: this.inRoom,
                 sessionId: this.sessionId,
                 stepsOpen: row.stepsOpen,
+                expandedTool: row.expandedTool,
                 stamp: row.stamp,
                 author: row.author,
                 admin: row.admin,
                 onLongPress: (text: string): void => this.onLongPress(text),
                 onToggleSteps: (): void => this.onToggleSteps(row.key),
+                onToggleTool: (index: number): void => this.onToggleTool(row.key, index),
                 onOpenFile: (file: FileRef) => this.onOpenFile(file),
+                onSaveFile: (file: FileRef) => this.onSaveFile(file),
                 onOpenPhoto: (index: number): void => this.openPhotoOf(row, index),
                 onRetry: (localId: string, discard: boolean) => this.onRetry(localId, discard),
               })
@@ -301,6 +379,8 @@ export struct MessageList {
         this.firstVisible = start
         this.nearBottom = start <= 2
         this.away = start >= 6
+        if (this.nearBottom && this.unread > 0) this.unread = 0
+        keepScrollOffset(this.chatKey, Math.max(0, this.scroller.currentOffset().yOffset))
         // The two spacer ListItems sit outside the row source's count.
         const total = this.source.count() + 2
         if (total > 0 && end >= total - 6) {
@@ -308,6 +388,30 @@ export struct MessageList {
         }
       })
       .onReachEnd((): void => this.maybeLoadOlder())
+      // The dock snap (the inverted list's resting zone is index 0): a fast
+      // fling that stops with the bottom spacer only partly in view — the
+      // newest bubble stuck under the composer — finishes the move with one
+      // short scroll of its own, so a single gesture lands on the dock. The
+      // resting offset fails the test, so the snap puts itself out; a touch
+      // cancels a snap in flight instead of stacking another one.
+      .onScrollStop((): void => {
+        const offset: number = this.scroller.currentOffset().yOffset
+        if (this.snapping) {
+          if (offset <= 1) {
+            this.snapping = false
+          }
+          return
+        }
+        if (this.firstVisible === 0 && offset > 1) {
+          this.snapping = true
+          this.scroller.scrollToIndex(0, true)
+        }
+      })
+      .onTouch((event: TouchEvent): void => {
+        if (event.type === TouchType.Down || event.type === TouchType.Move) {
+          this.snapping = false
+        }
+      })
 
       if (this.loadingOlder) {
         Row() {
@@ -322,24 +426,37 @@ export struct MessageList {
         .margin({ top: appStore.safeTop + 60 })
       }
 
-      if (this.away) {
-        Column() {
-          Icon({ name: 'arrowDown', iconSize: 18, color: this.p().ink2 })
+      // The jump-to-latest chip: a quiet arrow while reading history, an
+      // accent pill counting the new rows that landed below (Chat.tsx).
+      if (this.away || this.unread > 0) {
+        Row({ space: 6 }) {
+          if (this.unread > 0) {
+            Text(t('{count} new', { 'count': this.unread }))
+              .fontSize(type.caption.fontSize)
+              .lineHeight(type.caption.lineHeight)
+              .fontWeight('600')
+              .fontColor(this.p().accentInk)
+          }
+          Icon({ name: 'arrowDown', iconSize: 16, color: this.unread > 0 ? this.p().accentInk : this.p().ink2 })
         }
-        .width(38)
-        .height(38)
-        .borderRadius(19)
+        .height(this.unread > 0 ? 36 : 38)
+        .borderRadius(18)
         .justifyContent(FlexAlign.Center)
-        .alignItems(HorizontalAlign.Center)
-        .backgroundColor(this.p().card)
-        .border({ width: 0.5, color: this.p().line2 })
+        .alignItems(VerticalAlign.Center)
+        .padding({ left: this.unread > 0 ? 12 : 11, right: this.unread > 0 ? 12 : 11 })
+        .backgroundColor(this.unread > 0 ? this.p().accent : this.p().card)
+        .border({ width: 0.5, color: this.unread > 0 ? this.p().accent : this.p().line2 })
         .shadow(shadowOf(2))
         .position({ x: '100%', y: '100%' })
         // Anchored above the floating composer: its bottom inset + 44 pill +
         // gap, so the chip clears the bottom chrome instead of hiding under it.
         .markAnchor({ x: 52, y: Math.max(appStore.safeBottom, 10) + 96 })
         .accessibilityText(t('Latest messages'))
-        .onClick((): void => this.scroller.scrollToIndex(0, true))
+        .onClick((): void => {
+          this.unread = 0
+          keepScrollOffset(this.chatKey, 0)
+          this.scroller.scrollToIndex(0, true)
+        })
       }
     }
     .width('100%')

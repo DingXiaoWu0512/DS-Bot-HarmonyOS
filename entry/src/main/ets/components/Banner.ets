@@ -1,9 +1,10 @@
 // The top notice banner ported from mobile/src/nav/ShellB.tsx (NoticeBanner).
-// A question or approval that lands while the app is open shows at the top;
-// a tap opens the chat it belongs to, and it dismisses itself after 8 seconds.
-// The host supplies the current notice (from the team feed, gated by the
-// banner preference and the chat on screen), the status-bar inset, and wires
-// the open/dismiss events to navigation and its own notice state.
+// A question, approval, message, group or done notice that lands while the app
+// is open shows at the top; a tap opens the chat it belongs to, and it
+// dismisses itself after 8 seconds. The host supplies the current notice (from
+// the team feed, gated by the banner preference and the chat on screen), the
+// status-bar inset, and wires the open/dismiss events to navigation and its
+// own notice state.
 
 import { appStore, type, radius, shadowOf } from './Theme'
 
@@ -89,6 +90,10 @@ export struct Banner {
           .maxLines(2)
           .textOverflow({ overflow: TextOverflow.Ellipsis })
           .onClick(() => this.tap())
+          // The covering Column passes touches through (HitTestMode.None) so
+          // the chat below stays reachable; this card blocks the pass-through
+          // so its own tap lands (faqs-arkui-1052, scenario one).
+          .hitTestBehavior(HitTestMode.BLOCK_HIERARCHY)
       }
       .width('100%')
       .height('100%')
